@@ -129,6 +129,9 @@
   }
   input[type="range"] { width: 100%; accent-color: var(--rouge); }
   .coche { display: flex; gap: 0.625rem; align-items: flex-start; margin: 0 0 0.75rem; }
+  .panne { margin: 0 0 0.875rem 1.875rem; }
+  .panne .aide { color: var(--encre-douce); font-size: 0.9375rem; margin: 0 0 0.5rem; }
+  .panne button { padding: 0.5rem 0.75rem; font-size: 0.9375rem; }
   .coche .aide { display: block; color: var(--encre-douce); font-size: 0.9375rem; }
   .coche input { width: 1.25rem; height: 1.25rem; margin-top: 0.15rem; accent-color: var(--rouge); flex: none; }
 
@@ -201,6 +204,10 @@
       <label class="coche"><input type="checkbox" id="inverse"><span>Parcourir dans l’autre sens</span></label>
       <label class="coche"><input type="checkbox" id="denivele"><span>Envoyer aussi le dénivelé <span class="aide" id="denivele-aide">Ajoute le profil d’altitude sur la montre.</span></span></label>
       <label class="coche"><input type="checkbox" id="chemins" checked><span>Ajouter les chemins autour <span class="aide">Les routes et sentiers proches, en gris sous ton tracé. Source : OpenStreetMap.</span></span></label>
+      <div id="chemins-panne" class="panne" hidden>
+        <p class="aide" id="chemins-raison"></p>
+        <button type="button" id="chemins-reessayer">Réessayer les chemins</button>
+      </div>
     </div>
   </section>
 
@@ -382,42 +389,75 @@ var Core = (function () {
   /* ---------- Chemins autour du tracé (OpenStreetMap) ---------- */
 
   var OVERPASS = ["https://overpass-api.de/api/interpreter",
-                  "https://overpass.kumi.systems/api/interpreter"];
+                  "https://overpass.private.coffee/api/interpreter",
+                  "https://maps.mail.ru/osm/tools/overpass/api/interpreter"];
   var RAYON_CHEMINS = 150;          // on cherche les chemins à 150 m du tracé au plus
+  var EXCLUS = "[highway!~\"^(proposed|construction|abandoned|razed|platform|elevator|corridor|bus_stop|services|rest_area)$\"]";
+
+  // Explique une erreur en mots simples.
+  function raison(e, serveur) {
+    var nom = serveur.split("/")[2];
+    if (e && e.name === "AbortError") return nom + " : trop long";
+    if (e && e.statut === 429) return nom + " : trop de demandes";
+    if (e && (e.statut === 504 || e.statut === 503)) return nom + " : serveur occupé";
+    if (e && e.statut) return nom + " : erreur " + e.statut;
+    if (e instanceof TypeError) return nom + " : bloqué ou injoignable";
+    return nom + " : " + (e && e.message ? e.message : "erreur");
+  }
+
+  async function interroger(serveur, requete, fetchFn) {
+    var arret = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var minuteur = arret ? setTimeout(function () { arret.abort(); }, 40000) : null;
+    try {
+      var r = await fetchFn(serveur, {
+        method: "POST",
+        signal: arret ? arret.signal : undefined,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "data=" + encodeURIComponent(requete)
+      });
+      if (!r.ok) { var err = new Error("statut " + r.status); err.statut = r.status; throw err; }
+      return await r.json();
+    } finally {
+      if (minuteur) clearTimeout(minuteur);
+    }
+  }
 
   // Demande à OpenStreetMap les routes et sentiers proches du tracé.
+  // Essaie plusieurs serveurs, et deux façons de demander.
   // Rend une liste de chemins : [[{lat, lon}, ...], ...]
   async function chargerChemins(points, fetchFn) {
-    var guide = alleger(points, 120, 20).points;
+    var guide = alleger(points, 80, 25).points;
     var coords = guide.map(function (p) { return p.lat.toFixed(5) + "," + p.lon.toFixed(5); }).join(",");
-    var requete = "[out:json][timeout:25];" +
-      "way(around:" + RAYON_CHEMINS + "," + coords + ")[highway]" +
-      "[highway!~\"^(proposed|construction|abandoned|razed|platform|elevator|corridor|bus_stop|services|rest_area)$\"];" +
-      "out geom qt;";
-    var derniere = null;
+    var b = boite(points);
+    var marge = RAYON_CHEMINS / 111000, margeLon = marge / Math.cos((b.minLat + b.maxLat) / 2 * RAD);
+    var cadre = (b.minLat - marge).toFixed(5) + "," + (b.minLon - margeLon).toFixed(5) + "," +
+                (b.maxLat + marge).toFixed(5) + "," + (b.maxLon + margeLon).toFixed(5);
+    var requetes = [
+      "[out:json][timeout:25];way(around:" + RAYON_CHEMINS + "," + coords + ")[highway]" + EXCLUS + ";out geom qt;",
+      "[out:json][timeout:25];way(" + cadre + ")[highway]" + EXCLUS + ";out geom qt;"
+    ];
+    var raisons = [];
     for (var i = 0; i < OVERPASS.length; i++) {
-      try {
-        var arret = typeof AbortController !== "undefined" ? new AbortController() : null;
-        var minuteur = arret ? setTimeout(function () { arret.abort(); }, 35000) : null;
-        var r = await fetchFn(OVERPASS[i], {
-          method: "POST",
-          signal: arret ? arret.signal : undefined,
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: "data=" + encodeURIComponent(requete)
-        });
-        if (!r.ok) throw new Error("OpenStreetMap répond " + r.status);
-        var json = await r.json();
-        if (minuteur) clearTimeout(minuteur);
-        var chemins = [];
-        (json.elements || []).forEach(function (el) {
-          if (el.type === "way" && Array.isArray(el.geometry) && el.geometry.length > 1) {
-            chemins.push(el.geometry.filter(Boolean).map(function (g) { return { lat: g.lat, lon: g.lon }; }));
-          }
-        });
-        return chemins;
-      } catch (e) { derniere = e; }
+      for (var q = 0; q < requetes.length; q++) {
+        try {
+          var json = await interroger(OVERPASS[i], requetes[q], fetchFn);
+          var chemins = [];
+          (json.elements || []).forEach(function (el) {
+            if (el.type === "way" && Array.isArray(el.geometry) && el.geometry.length > 1) {
+              chemins.push(el.geometry.filter(Boolean).map(function (g) { return { lat: g.lat, lon: g.lon }; }));
+            }
+          });
+          return chemins;
+        } catch (e) {
+          raisons.push(raison(e, OVERPASS[i]));
+          // seule une demande refusée (400) vaut la peine d'être reformulée sur le même serveur
+          if (!(e && e.statut === 400)) break;
+        }
+      }
     }
-    throw derniere || new Error("OpenStreetMap ne répond pas");
+    var fin = new Error(raisons.join(" ; "));
+    fin.raisons = raisons;
+    throw fin;
   }
 
   // Garde les morceaux de chemins proches du tracé, allégés, sans dépasser maxPts points.
@@ -446,6 +486,22 @@ var Core = (function () {
       }
       return Math.sqrt(best);
     }
+    // ajoute des points tous les 25 m sur les longs segments,
+    // pour ne pas rater une route qui croise le tracé entre deux points éloignés
+    chemins = chemins.map(function (ch) {
+      var sortie = [ch[0]];
+      for (var i = 1; i < ch.length; i++) {
+        var a = m(ch[i - 1]), c = m(ch[i]);
+        var nb = Math.floor(Math.sqrt(Math.pow(c[0] - a[0], 2) + Math.pow(c[1] - a[1], 2)) / 25);
+        for (var k = 1; k <= nb && nb < 400; k++) {
+          var t = k / (nb + 1);
+          sortie.push({ lat: ch[i - 1].lat + t * (ch[i].lat - ch[i - 1].lat),
+                        lon: ch[i - 1].lon + t * (ch[i].lon - ch[i - 1].lon) });
+        }
+        sortie.push(ch[i]);
+      }
+      return sortie;
+    });
     // distance au tracé de chaque point de chaque chemin (calculée une seule fois)
     var mesures = chemins.map(function (ch) {
       return ch.map(function (p) { var q = m(p); return distTrace(q[0], q[1]); });
@@ -562,7 +618,7 @@ var Core = (function () {
   var $ = function (id) { return document.getElementById(id); };
   var FICHIER = "track.json";
   var etat = { brut: null, nomFichier: "", longueur: 0, aDenivele: false, json: "",
-               chemins: null, cheminsEtat: "", jeton: 0 };
+               chemins: null, cheminsEtat: "", cheminsRaison: "", jeton: 0 };
   var MAX_POINTS_CHEMINS = 600;      // limite pour la mémoire de la montre
 
   function memoire(cle, valeur) {
@@ -698,6 +754,9 @@ var Core = (function () {
     } else {
       $("f-chemins").textContent = etat.cheminsEtat || "–";
     }
+    var enPanne = $("chemins").checked && etat.cheminsEtat === "indisponibles";
+    $("chemins-panne").hidden = !enPanne;
+    $("chemins-raison").textContent = enPanne ? etat.cheminsRaison : "";
     dessiner(msg);
     dire("etat-envoi", "", "");
   }
@@ -748,6 +807,7 @@ var Core = (function () {
     if (!etat.brut || Array.isArray(etat.chemins) || etat.cheminsEtat === "chargement…") return;
     var jeton = ++etat.jeton;
     etat.cheminsEtat = "chargement…";
+    etat.cheminsRaison = "";
     $("envoyer").disabled = true;
     recalculer();
     try {
@@ -758,12 +818,19 @@ var Core = (function () {
       etat.cheminsEtat = "";
     } catch (e) {
       if (jeton !== etat.jeton) return;
-      etat.cheminsEtat = "indisponibles, réessaie plus tard";
+      etat.cheminsEtat = "indisponibles";
+      etat.cheminsRaison = e && e.message ? e.message : "";
+      if (window.console) console.warn("Chemins OpenStreetMap :", e);
     } finally {
       if (jeton === etat.jeton) $("envoyer").disabled = false;
     }
     recalculer();
   }
+
+  $("chemins-reessayer").addEventListener("click", function () {
+    etat.cheminsEtat = "";
+    lancerChemins();
+  });
 
   $("chemins").addEventListener("change", function () {
     if (this.checked && !Array.isArray(etat.chemins)) {
