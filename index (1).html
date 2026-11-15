@@ -1,0 +1,1090 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPX vers la montre</title>
+<meta name="robots" content="noindex">
+<style>
+  :root {
+    --fond: #edf0ec;
+    --carte: #ffffff;
+    --encre: #17211c;
+    --encre-douce: #57645d;
+    --trait: #cfd6d0;
+    --rouge: #d22630;      /* le rouge du tracé sur la montre */
+    --bleu: #1f4fbf;       /* le bleu du curseur sur la montre */
+    --ok: #2f6b48;
+    --boitier: #20262a;
+    --ecran: #ffffff;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fond: #121714;
+      --carte: #1b221e;
+      --encre: #e7ede8;
+      --encre-douce: #9aa8a0;
+      --trait: #323c36;
+      --rouge: #ff5a62;
+      --bleu: #7fa2ff;
+      --ok: #7fc79a;
+      --boitier: #05070a;
+      --ecran: #f4f6f2;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--fond);
+    color: var(--encre);
+    font-family: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 1.0625rem;
+    line-height: 1.45;
+  }
+  main {
+    max-width: 30rem;
+    margin: 0 auto;
+    padding: 1.5rem 1.125rem 4rem;
+  }
+  h1 {
+    font-size: 1.75rem;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.375rem;
+  }
+  .chapo { margin: 0 0 1.5rem; color: var(--encre-douce); }
+
+  .etape {
+    display: grid;
+    grid-template-columns: 2rem 1fr;
+    column-gap: 0.75rem;
+    padding: 1.125rem 0;
+    border-top: 1px solid var(--trait);
+  }
+  .etape[hidden] { display: none; }
+  .num {
+    width: 2rem; height: 2rem;
+    border-radius: 50%;
+    border: 2px solid var(--encre);
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 0.9375rem;
+  }
+  .etape h2 { font-size: 1.125rem; margin: 0.15rem 0 0.75rem; }
+
+  button, .bouton {
+    font: inherit; font-weight: 700;
+    display: block; width: 100%;
+    padding: 0.875rem 1rem;
+    border-radius: 0.875rem;
+    border: 2px solid var(--encre);
+    background: transparent; color: var(--encre);
+    text-align: center; cursor: pointer;
+  }
+  button.fort {
+    background: var(--rouge); border-color: var(--rouge); color: #fff;
+  }
+  @media (prefers-color-scheme: dark) { button.fort { color: #1a0507; } }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button:focus-visible, .bouton:focus-within, input:focus-visible, summary:focus-visible, a:focus-visible {
+    outline: 3px solid var(--bleu); outline-offset: 2px;
+  }
+  .bouton input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .bouton { position: relative; }
+
+  /* L'écran de la montre : seul élément « dessiné » de la page */
+  .montre {
+    width: min(15rem, 70vw);
+    aspect-ratio: 1;
+    margin: 0.25rem auto 1rem;
+    border-radius: 50%;
+    background: var(--boitier);
+    padding: 0.875rem;
+    box-shadow: 0 0.5rem 1.25rem rgba(10, 20, 15, 0.22);
+  }
+  .montre canvas {
+    display: block; width: 100%; height: 100%;
+    border-radius: 50%;
+    background: var(--ecran);
+  }
+
+  dl.faits {
+    display: grid; grid-template-columns: auto 1fr;
+    gap: 0.25rem 1rem; margin: 0 0 1rem;
+  }
+  dl.faits dt { color: var(--encre-douce); }
+  dl.faits dd { margin: 0; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .champ { margin: 0 0 0.875rem; }
+  .champ label, .champ .intitule { display: block; margin-bottom: 0.25rem; }
+  .champ .aide { display: block; color: var(--encre-douce); font-size: 0.9375rem; }
+  input[type="text"], input[type="password"] {
+    font: inherit; width: 100%;
+    padding: 0.625rem 0.75rem;
+    border-radius: 0.625rem;
+    border: 1.5px solid var(--trait);
+    background: var(--carte); color: var(--encre);
+  }
+  input[type="range"] { width: 100%; accent-color: var(--rouge); }
+  .coche { display: flex; gap: 0.625rem; align-items: flex-start; margin: 0 0 0.75rem; }
+  .panne { margin: 0 0 0.875rem 1.875rem; }
+  .panne .aide { color: var(--encre-douce); font-size: 0.9375rem; margin: 0 0 0.5rem; }
+  .panne button { padding: 0.5rem 0.75rem; font-size: 0.9375rem; }
+  .coche .aide { display: block; color: var(--encre-douce); font-size: 0.9375rem; }
+  .coche input { width: 1.25rem; height: 1.25rem; margin-top: 0.15rem; accent-color: var(--rouge); flex: none; }
+
+  .etat { margin: 0.75rem 0 0; min-height: 1.5em; }
+  .etat.ok { color: var(--ok); font-weight: 700; }
+  .etat.erreur { color: var(--rouge); font-weight: 700; }
+  .lien-discret {
+    display: inline-block; margin-top: 0.75rem;
+    background: none; border: 0; padding: 0; width: auto;
+    font-weight: 400; color: var(--encre-douce); text-decoration: underline;
+  }
+
+  .discret { font-weight: 400; color: var(--encre-douce); font-size: 0.9375rem; }
+  .aide-bloc { margin: 0 0 0.75rem; color: var(--encre-douce); font-size: 0.9375rem; }
+  ul.biblio { list-style: none; margin: 0; padding: 0; }
+  ul.biblio li {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.625rem 0; border-bottom: 1px solid var(--trait);
+  }
+  ul.biblio li .nom-trace { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  ul.biblio li .recent { color: var(--encre-douce); font-size: 0.875rem; display: block; }
+  ul.biblio li button { width: auto; padding: 0.375rem 0.75rem; font-size: 0.9375rem; font-weight: 600; border-width: 1.5px; }
+  details {
+    margin-top: 1.5rem;
+    border-top: 1px solid var(--trait);
+    padding-top: 1rem;
+  }
+  summary { font-weight: 700; cursor: pointer; padding: 0.25rem 0; }
+  details .corps { padding-top: 0.875rem; }
+  .adresse {
+    display: block; word-break: break-all;
+    padding: 0.625rem 0.75rem; border-radius: 0.625rem;
+    background: var(--carte); border: 1.5px dashed var(--trait);
+    font-family: ui-monospace, Menlo, monospace; font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+  }
+  footer { margin-top: 2rem; color: var(--encre-douce); font-size: 0.875rem; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>GPX vers la montre</h1>
+  <p class="chapo">Choisis un tracé. La page l’allège et le met en ligne. La montre le récupère.</p>
+
+  <section class="etape">
+    <div class="num" aria-hidden="true">1</div>
+    <div>
+      <h2>Choisir le tracé</h2>
+      <label class="bouton">
+        <input type="file" id="fichier">
+        <span id="fichier-texte">Choisir un fichier GPX</span>
+      </label>
+      <p class="etat" id="etat-fichier" role="status"></p>
+    </div>
+  </section>
+
+  <section class="etape" id="etape-2" hidden>
+    <div class="num" aria-hidden="true">2</div>
+    <div>
+      <h2>Vérifier</h2>
+      <div class="montre"><canvas id="apercu" width="416" height="416" aria-label="Aperçu du tracé sur la montre"></canvas></div>
+      <dl class="faits">
+        <dt>Distance</dt><dd id="f-distance">–</dd>
+        <dt>Points envoyés</dt><dd id="f-points">–</dd>
+        <dt>Écart avec l’original</dt><dd id="f-ecart">–</dd>
+        <dt>Chemins autour</dt><dd id="f-chemins">–</dd>
+        <dt>Poids du fichier</dt><dd id="f-poids">–</dd>
+      </dl>
+
+      <div class="champ">
+        <label for="nom">Nom du tracé</label>
+        <input type="text" id="nom" maxlength="24" autocomplete="off">
+      </div>
+      <div class="champ">
+        <label for="maxpts">Nombre de points maximum : <strong id="maxpts-val">300</strong></label>
+        <input type="range" id="maxpts" min="100" max="500" step="50" value="300">
+        <span class="aide">Plus de points = tracé plus fidèle, mais plus lourd pour la montre.</span>
+      </div>
+      <label class="coche"><input type="checkbox" id="inverse"><span>Parcourir dans l’autre sens</span></label>
+      <label class="coche"><input type="checkbox" id="denivele"><span>Envoyer aussi le dénivelé <span class="aide" id="denivele-aide">Ajoute le profil d’altitude sur la montre.</span></span></label>
+      <label class="coche"><input type="checkbox" id="chemins" checked><span>Ajouter les chemins autour <span class="aide">Les routes et sentiers proches, en gris sous ton tracé. Source : OpenStreetMap.</span></span></label>
+      <div id="chemins-panne" class="panne" hidden>
+        <p class="aide" id="chemins-raison"></p>
+        <button type="button" id="chemins-reessayer">Réessayer les chemins</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="etape" id="etape-3" hidden>
+    <div class="num" aria-hidden="true">3</div>
+    <div>
+      <h2>Envoyer</h2>
+      <button class="fort" id="envoyer" type="button">Envoyer vers la montre</button>
+      <p class="etat" id="etat-envoi" role="status"></p>
+      <button class="lien-discret" id="enregistrer" type="button">Enregistrer le fichier du tracé à la place</button>
+    </div>
+  </section>
+
+  <section class="etape" id="etape-biblio">
+    <div class="num" aria-hidden="true">✓</div>
+    <div>
+      <h2>Dans la montre <span class="discret">(5 au plus)</span></h2>
+      <p class="aide-bloc">Le dernier envoyé devient le tracé actif. Sur la montre, menu « Tracés » pour en choisir un autre.</p>
+      <ul class="biblio" id="biblio"></ul>
+      <p class="etat" id="etat-biblio" role="status"></p>
+    </div>
+  </section>
+
+  <details id="reglages">
+    <summary>Réglages (à faire une seule fois)</summary>
+    <div class="corps">
+      <div class="champ">
+        <label for="jeton">Jeton GitHub</label>
+        <input type="password" id="jeton" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <span class="aide">La clé qui autorise cette page à écrire le tracé dans ton dépôt. Elle reste dans ce navigateur.</span>
+      </div>
+      <div class="champ">
+        <label for="compte">Compte GitHub</label>
+        <input type="text" id="compte" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="champ">
+        <label for="depot">Dépôt</label>
+        <input type="text" id="depot" autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="champ">
+        <span class="intitule">Adresse pour la montre</span>
+        <code class="adresse" id="adresse">–</code>
+        <button type="button" id="copier">Copier l’adresse</button>
+        <span class="aide">À coller dans le fichier TrackUrl.mc avant de compiler l’appli (ligne BASE_URL).</span>
+      </div>
+    </div>
+  </details>
+
+  <footer>
+    Le tracé mis en ligne est public : toute personne qui a l’adresse peut le voir.
+    Format de tracé repris de <a href="https://github.com/andan67/wormnav">WormNav</a> (GPL-3.0).
+    Chemins : © les contributeurs d’<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.
+  </footer>
+</main>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------
+   Calculs (aucun accès à la page ici : testable à part)
+   Le format de sortie reprend celui de l'appli Android WormNav
+   (SendToDeviceUtility.generateMessageForDevice).
+------------------------------------------------------------------- */
+var Core = (function () {
+  var R = 6371000;                 // rayon de la Terre utilisé par la montre (m)
+  var RAD = Math.PI / 180;
+  var ECHELLE = 1e7;               // x et y sont envoyés en entiers : valeur x 10 000 000
+
+  function texte(noeud, balise) {
+    for (var i = 0; i < noeud.childNodes.length; i++) {
+      var c = noeud.childNodes[i];
+      if (c.nodeType === 1 && c.localName === balise) return (c.textContent || "").trim();
+    }
+    return "";
+  }
+
+  // Lit un GPX. Rend { nom, points:[{lat, lon, ele}] } (ele = null si absente).
+  function lireGpx(xml, Parser) {
+    var doc = new Parser().parseFromString(xml, "application/xml");
+    if (!doc || !doc.documentElement || doc.getElementsByTagName("parsererror").length) {
+      throw new Error("Ce fichier n’est pas un GPX lisible.");
+    }
+    var sortes = ["trkpt", "rtept"];
+    var noeuds = [];
+    for (var s = 0; s < sortes.length && !noeuds.length; s++) {
+      noeuds = doc.getElementsByTagNameNS("*", sortes[s]);
+      if (!noeuds.length) noeuds = doc.getElementsByTagName(sortes[s]);
+    }
+    var points = [];
+    for (var i = 0; i < noeuds.length; i++) {
+      var lat = parseFloat(noeuds[i].getAttribute("lat"));
+      var lon = parseFloat(noeuds[i].getAttribute("lon"));
+      if (!isFinite(lat) || !isFinite(lon)) continue;
+      var e = parseFloat(texte(noeuds[i], "ele"));
+      points.push({ lat: lat, lon: lon, ele: isFinite(e) ? e : null });
+    }
+    if (points.length < 2) throw new Error("Aucun tracé trouvé dans ce fichier.");
+
+    var nom = "";
+    var parents = ["trk", "rte", "metadata"];
+    for (var p = 0; p < parents.length && !nom; p++) {
+      var liste = doc.getElementsByTagNameNS("*", parents[p]);
+      if (!liste.length) liste = doc.getElementsByTagName(parents[p]);
+      if (liste.length) nom = texte(liste[0], "name");
+    }
+    return { nom: nom, points: points };
+  }
+
+  function haversine(a, b) {
+    var dLat = (b.lat - a.lat) * RAD, dLon = (b.lon - a.lon) * RAD;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+
+  function longueur(points) {
+    var d = 0;
+    for (var i = 1; i < points.length; i++) d += haversine(points[i - 1], points[i]);
+    return d;
+  }
+
+  function boite(points) {
+    var b = { minLat: Infinity, maxLat: -Infinity, minLon: Infinity, maxLon: -Infinity };
+    for (var i = 0; i < points.length; i++) {
+      var p = points[i];
+      if (p.lat < b.minLat) b.minLat = p.lat;
+      if (p.lat > b.maxLat) b.maxLat = p.lat;
+      if (p.lon < b.minLon) b.minLon = p.lon;
+      if (p.lon > b.maxLon) b.maxLon = p.lon;
+    }
+    return b;
+  }
+
+  // Allège le tracé : garde au plus maxPts points, en retirant d'abord
+  // ceux dont l'absence déforme le moins la ligne. S'arrête plus tôt si
+  // l'écart tombe sous tolM mètres. Rend { points, ecart } (écart max en m).
+  function alleger(points, maxPts, tolM) {
+    var n = points.length;
+    if (n <= 2) return { points: points.slice(), ecart: 0 };
+    var b = boite(points);
+    var lat0 = (b.minLat + b.maxLat) / 2 * RAD, lon0 = (b.minLon + b.maxLon) / 2 * RAD;
+    var cos0 = Math.cos(lat0);
+    var px = new Float64Array(n), py = new Float64Array(n);
+    for (var i = 0; i < n; i++) {
+      px[i] = R * (points[i].lon * RAD - lon0) * cos0;
+      py[i] = R * (points[i].lat * RAD - lat0);
+    }
+    function pire(i0, i1) {            // point le plus éloigné du segment i0-i1
+      var ax = px[i0], ay = py[i0], dx = px[i1] - ax, dy = py[i1] - ay;
+      var l2 = dx * dx + dy * dy, max = -1, idx = -1;
+      for (var k = i0 + 1; k < i1; k++) {
+        var t = l2 > 0 ? ((px[k] - ax) * dx + (py[k] - ay) * dy) / l2 : 0;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        var ex = px[k] - (ax + t * dx), ey = py[k] - (ay + t * dy);
+        var d2 = ex * ex + ey * ey;
+        if (d2 > max) { max = d2; idx = k; }
+      }
+      return { i0: i0, i1: i1, d: max < 0 ? 0 : Math.sqrt(max), idx: idx };
+    }
+    var garde = new Uint8Array(n);
+    garde[0] = 1; garde[n - 1] = 1;
+    var nb = 2, segs = [pire(0, n - 1)];
+    while (nb < maxPts) {
+      var m = -1, md = tolM;
+      for (var s = 0; s < segs.length; s++) if (segs[s].d > md) { md = segs[s].d; m = s; }
+      if (m < 0) break;
+      var seg = segs[m];
+      garde[seg.idx] = 1; nb++;
+      segs[m] = pire(seg.i0, seg.idx);
+      segs.push(pire(seg.idx, seg.i1));
+    }
+    var ecart = 0;
+    for (var q = 0; q < segs.length; q++) if (segs[q].d > ecart) ecart = segs[q].d;
+    var sortie = [];
+    for (var j = 0; j < n; j++) if (garde[j]) sortie.push(points[j]);
+    return { points: sortie, ecart: ecart };
+  }
+
+  // Même projection que WormNav (plan tangent au centre du tracé), sans unité.
+  function projeter(lat, lon, latC, lonC) {
+    return [
+      Math.cos(lat) * Math.sin(lon - lonC),
+      Math.cos(latC) * Math.sin(lat) - Math.sin(latC) * Math.cos(lat) * Math.cos(lon - lonC)
+    ];
+  }
+
+  function f32(v) { return Number(Math.fround(v).toPrecision(9)); }
+
+  /* ---------- Chemins autour du tracé (OpenStreetMap) ---------- */
+
+  var OVERPASS = ["https://overpass-api.de/api/interpreter",
+                  "https://overpass.private.coffee/api/interpreter",
+                  "https://maps.mail.ru/osm/tools/overpass/api/interpreter"];
+  var RAYON_CHEMINS = 150;          // on cherche les chemins à 150 m du tracé au plus
+  var EXCLUS = "[highway!~\"^(proposed|construction|abandoned|razed|platform|elevator|corridor|bus_stop|services|rest_area)$\"]";
+
+  // Explique une erreur en mots simples.
+  function raison(e, serveur) {
+    var nom = serveur.split("/")[2];
+    if (e && e.name === "AbortError") return nom + " : trop long";
+    if (e && e.statut === 429) return nom + " : trop de demandes";
+    if (e && (e.statut === 504 || e.statut === 503)) return nom + " : serveur occupé";
+    if (e && e.statut) return nom + " : erreur " + e.statut;
+    if (e instanceof TypeError) return nom + " : bloqué ou injoignable";
+    return nom + " : " + (e && e.message ? e.message : "erreur");
+  }
+
+  async function interroger(serveur, requete, fetchFn) {
+    var arret = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var minuteur = arret ? setTimeout(function () { arret.abort(); }, 40000) : null;
+    try {
+      var r = await fetchFn(serveur, {
+        method: "POST",
+        signal: arret ? arret.signal : undefined,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "data=" + encodeURIComponent(requete)
+      });
+      if (!r.ok) { var err = new Error("statut " + r.status); err.statut = r.status; throw err; }
+      return await r.json();
+    } finally {
+      if (minuteur) clearTimeout(minuteur);
+    }
+  }
+
+  // Demande à OpenStreetMap les routes et sentiers proches du tracé.
+  // Essaie plusieurs serveurs, et deux façons de demander.
+  // Rend une liste de chemins : [[{lat, lon}, ...], ...]
+  async function chargerChemins(points, fetchFn) {
+    var guide = alleger(points, 80, 25).points;
+    var coords = guide.map(function (p) { return p.lat.toFixed(5) + "," + p.lon.toFixed(5); }).join(",");
+    var b = boite(points);
+    var marge = RAYON_CHEMINS / 111000, margeLon = marge / Math.cos((b.minLat + b.maxLat) / 2 * RAD);
+    var cadre = (b.minLat - marge).toFixed(5) + "," + (b.minLon - margeLon).toFixed(5) + "," +
+                (b.maxLat + marge).toFixed(5) + "," + (b.maxLon + margeLon).toFixed(5);
+    var requetes = [
+      "[out:json][timeout:25];way(around:" + RAYON_CHEMINS + "," + coords + ")[highway]" + EXCLUS + ";out geom qt;",
+      "[out:json][timeout:25];way(" + cadre + ")[highway]" + EXCLUS + ";out geom qt;"
+    ];
+    var raisons = [];
+    for (var i = 0; i < OVERPASS.length; i++) {
+      for (var q = 0; q < requetes.length; q++) {
+        try {
+          var json = await interroger(OVERPASS[i], requetes[q], fetchFn);
+          var chemins = [];
+          (json.elements || []).forEach(function (el) {
+            if (el.type === "way" && Array.isArray(el.geometry) && el.geometry.length > 1) {
+              chemins.push(el.geometry.filter(Boolean).map(function (g) { return { lat: g.lat, lon: g.lon }; }));
+            }
+          });
+          return chemins;
+        } catch (e) {
+          raisons.push(raison(e, OVERPASS[i]));
+          // seule une demande refusée (400) vaut la peine d'être reformulée sur le même serveur
+          if (!(e && e.statut === 400)) break;
+        }
+      }
+    }
+    var fin = new Error(raisons.join(" ; "));
+    fin.raisons = raisons;
+    throw fin;
+  }
+
+  // Garde les morceaux de chemins proches du tracé, allégés, sans dépasser maxPts points.
+  // Les bouts qui se confondent avec le tracé sont retirés (ils seraient cachés sous la ligne rouge).
+  function preparerChemins(chemins, trace, maxPts) {
+    if (!chemins || !chemins.length) return [];
+    var b = boite(trace);
+    var lat0 = (b.minLat + b.maxLat) / 2 * RAD, lon0 = (b.minLon + b.maxLon) / 2 * RAD, c0 = Math.cos(lat0);
+    function m(p) { return [R * (p.lon * RAD - lon0) * c0, R * (p.lat * RAD - lat0)]; }
+    var tr = trace.map(m);
+    var bx = [Infinity, -Infinity, Infinity, -Infinity];
+    tr.forEach(function (q) {
+      if (q[0] < bx[0]) bx[0] = q[0]; if (q[0] > bx[1]) bx[1] = q[0];
+      if (q[1] < bx[2]) bx[2] = q[1]; if (q[1] > bx[3]) bx[3] = q[1];
+    });
+    function distTrace(x, y) {
+      if (x < bx[0] - RAYON_CHEMINS || x > bx[1] + RAYON_CHEMINS ||
+          y < bx[2] - RAYON_CHEMINS || y > bx[3] + RAYON_CHEMINS) return Infinity;
+      var best = Infinity;
+      for (var i = 0; i < tr.length - 1; i++) {
+        var ax = tr[i][0], ay = tr[i][1], dx = tr[i + 1][0] - ax, dy = tr[i + 1][1] - ay;
+        var l2 = dx * dx + dy * dy, t = l2 > 0 ? ((x - ax) * dx + (y - ay) * dy) / l2 : 0;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        var ex = x - ax - t * dx, ey = y - ay - t * dy, d = ex * ex + ey * ey;
+        if (d < best) best = d;
+      }
+      return Math.sqrt(best);
+    }
+    // ajoute des points tous les 25 m sur les longs segments,
+    // pour ne pas rater une route qui croise le tracé entre deux points éloignés
+    chemins = chemins.map(function (ch) {
+      var sortie = [ch[0]];
+      for (var i = 1; i < ch.length; i++) {
+        var a = m(ch[i - 1]), c = m(ch[i]);
+        var nb = Math.floor(Math.sqrt(Math.pow(c[0] - a[0], 2) + Math.pow(c[1] - a[1], 2)) / 25);
+        for (var k = 1; k <= nb && nb < 400; k++) {
+          var t = k / (nb + 1);
+          sortie.push({ lat: ch[i - 1].lat + t * (ch[i].lat - ch[i - 1].lat),
+                        lon: ch[i - 1].lon + t * (ch[i].lon - ch[i - 1].lon) });
+        }
+        sortie.push(ch[i]);
+      }
+      return sortie;
+    });
+    // distance au tracé de chaque point de chaque chemin (calculée une seule fois)
+    var mesures = chemins.map(function (ch) {
+      return ch.map(function (p) { var q = m(p); return distTrace(q[0], q[1]); });
+    });
+
+    function decouper(rayon, tol) {
+      var morceaux = [];
+      chemins.forEach(function (ch, k) {
+        var d = mesures[k], courant = [];
+        for (var i = 0; i < ch.length - 1; i++) {
+          var garde = (d[i] <= rayon || d[i + 1] <= rayon) && !(d[i] < 8 && d[i + 1] < 8);
+          if (garde) {
+            if (!courant.length) courant.push({ p: ch[i], d: d[i] });
+            courant.push({ p: ch[i + 1], d: d[i + 1] });
+          } else if (courant.length) {
+            morceaux.push(courant); courant = [];
+          }
+        }
+        if (courant.length) morceaux.push(courant);
+      });
+      return morceaux.map(function (mc) {
+        var leger = alleger(mc.map(function (o) { return o.p; }), Infinity, tol).points;
+        var proche = Infinity;
+        mc.forEach(function (o) { if (o.d < proche) proche = o.d; });
+        return { points: leger, proche: proche };
+      });
+    }
+
+    var essais = [[150, 3], [150, 6], [120, 8], [90, 10], [60, 12], [40, 15]];
+    var morceaux = [];
+    for (var e = 0; e < essais.length; e++) {
+      morceaux = decouper(essais[e][0], essais[e][1]);
+      var total = morceaux.reduce(function (a, mc) { return a + mc.points.length; }, 0);
+      if (total <= maxPts) return morceaux.map(function (mc) { return mc.points; });
+    }
+    // toujours trop : on garde les morceaux les plus proches du tracé
+    morceaux.sort(function (a, c) { return a.proche - c.proche; });
+    var sortie = [], n = 0;
+    for (var j = 0; j < morceaux.length; j++) {
+      if (n + morceaux[j].points.length > maxPts) continue;
+      sortie.push(morceaux[j].points); n += morceaux[j].points.length;
+    }
+    return sortie;
+  }
+
+  // Fabrique l'objet envoyé à la montre : { s, x, y, e?, rx?, ry?, rn? }
+  function fabriquer(points, nom, longueurM, avecDenivele, chemins) {
+    var n = points.length, b = boite(points);
+    // Le centre est arrondi comme le fera la montre (nombre 32 bits),
+    // pour que la montre et la page calculent avec exactement le même centre.
+    var latC = Math.fround((b.minLat + b.maxLat) / 2 * RAD);
+    var lonC = Math.fround((b.minLon + b.maxLon) / 2 * RAD);
+    var no = projeter(b.maxLat * RAD, b.minLon * RAD, latC, lonC);
+    var se = projeter(b.minLat * RAD, b.maxLon * RAD, latC, lonC);
+    var diag = haversine({ lat: b.maxLat, lon: b.minLon }, { lat: b.minLat, lon: b.maxLon });
+
+    var x = new Array(n), y = new Array(n), fx = new Array(n), fy = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var xy = projeter(points[i].lat * RAD, points[i].lon * RAD, latC, lonC);
+      x[i] = Math.round(xy[0] * ECHELLE);
+      y[i] = Math.round(xy[1] * ECHELLE);
+      fx[i] = x[i] / ECHELLE; fy[i] = y[i] / ECHELLE;
+    }
+
+    var s = [nom, f32(longueurM), n, f32(no[0]), f32(no[1]), f32(se[0]), f32(se[1]),
+             f32(latC), f32(lonC), f32(diag)];
+    var msg = { s: s, x: x, y: y };
+
+    if (avecDenivele) {
+      var e = new Array(n), min = Infinity, max = -Infinity, iMin = 0, iMax = 0, monte = 0, descend = 0;
+      for (var k = 0; k < n; k++) {
+        e[k] = Math.round(points[k].ele);
+        if (e[k] < min) { min = e[k]; iMin = k; }
+        if (e[k] > max) { max = e[k]; iMax = k; }
+        if (k > 0) { var d = e[k] - e[k - 1]; if (d > 0) monte += d; else descend -= d; }
+      }
+      var cumul = 0, dMin = 0, dMax = 0;
+      for (var j = 0; j < n; j++) {
+        if (j > 0) {
+          var dx = fx[j] - fx[j - 1], dy = fy[j] - fy[j - 1];
+          cumul += Math.sqrt(dx * dx + dy * dy);
+        }
+        if (j === iMin) dMin = cumul;
+        if (j === iMax) dMax = cumul;
+      }
+      s.push(f32(cumul), min, f32(dMin), iMin, max, f32(dMax), iMax, monte, descend);
+      msg.e = e;
+    }
+    if (chemins && chemins.length) {
+      var rx = [], ry = [], rn = [];
+      chemins.forEach(function (morceau) {
+        rn.push(morceau.length);
+        morceau.forEach(function (p) {
+          var q = projeter(p.lat * RAD, p.lon * RAD, latC, lonC);
+          rx.push(Math.round(q[0] * ECHELLE));
+          ry.push(Math.round(q[1] * ECHELLE));
+        });
+      });
+      msg.rx = rx; msg.ry = ry; msg.rn = rn;
+    }
+    return msg;
+  }
+
+  return { lireGpx: lireGpx, longueur: longueur, alleger: alleger, fabriquer: fabriquer,
+           chargerChemins: chargerChemins, preparerChemins: preparerChemins,
+           projeter: projeter, R: R, ECHELLE: ECHELLE };
+})();
+
+/* ------------------------------------------------------------------
+   La page
+------------------------------------------------------------------- */
+(function () {
+  if (typeof document === "undefined") return;
+  var $ = function (id) { return document.getElementById(id); };
+  var FICHIER = "track.json";
+  var etat = { brut: null, nomFichier: "", longueur: 0, aDenivele: false, json: "",
+               chemins: null, cheminsEtat: "", cheminsRaison: "", jeton: 0 };
+  var MAX_POINTS_CHEMINS = 600;      // limite pour la mémoire de la montre
+
+  function memoire(cle, valeur) {
+    try {
+      if (valeur === undefined) return localStorage.getItem("gpxmontre." + cle) || "";
+      localStorage.setItem("gpxmontre." + cle, valeur);
+    } catch (e) { /* navigation privée : on fait sans */ }
+    return "";
+  }
+
+  function dire(id, message, sorte) {
+    var el = $(id);
+    el.textContent = message;
+    el.className = "etat" + (sorte ? " " + sorte : "");
+  }
+
+  /* ---- Réglages ---- */
+  function depuisAdresse() {
+    var hote = location.hostname || "";
+    if (!/\.github\.io$/i.test(hote)) return null;
+    var compte = hote.replace(/\.github\.io$/i, "");
+    var morceaux = location.pathname.split("/").filter(Boolean);
+    if (morceaux.length && /\.html?$/i.test(morceaux[morceaux.length - 1])) morceaux.pop();
+    return { compte: compte, depot: morceaux[0] || hote };
+  }
+
+  function adresseMontre() {
+    var compte = $("compte").value.trim(), depot = $("depot").value.trim();
+    if (!compte || !depot) return "";
+    var base = "https://" + compte.toLowerCase() + ".github.io/";
+    if (depot.toLowerCase() !== compte.toLowerCase() + ".github.io") base += depot + "/";
+    return base;
+  }
+
+  function majAdresse() { $("adresse").textContent = adresseMontre() || "–"; }
+
+  function initReglages() {
+    var auto = depuisAdresse();
+    $("jeton").value = memoire("jeton");
+    $("compte").value = memoire("compte") || (auto ? auto.compte : "");
+    $("depot").value = memoire("depot") || (auto ? auto.depot : "");
+    majAdresse();
+    if (!$("jeton").value) $("reglages").open = true;
+    ["jeton", "compte", "depot"].forEach(function (id) {
+      $(id).addEventListener("input", function () {
+        memoire(id, $(id).value.trim());
+        majAdresse();
+      });
+    });
+    $("copier").addEventListener("click", function () {
+      var a = adresseMontre();
+      if (!a) return;
+      var fini = function () { $("copier").textContent = "Adresse copiée"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(a).then(fini, function () {});
+      }
+    });
+  }
+
+  /* ---- Aperçu : le tracé comme sur l'écran de la montre ---- */
+  function dessiner(msg) {
+    var c = $("apercu"), g = c.getContext && c.getContext("2d");
+    if (!g) return;
+    var W = c.width, n = msg.x.length;
+    g.clearRect(0, 0, W, W);
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < n; i++) {
+      if (msg.x[i] < minX) minX = msg.x[i];
+      if (msg.x[i] > maxX) maxX = msg.x[i];
+      if (msg.y[i] < minY) minY = msg.y[i];
+      if (msg.y[i] > maxY) maxY = msg.y[i];
+    }
+    var cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    var demi = Math.sqrt(Math.pow(maxX - minX, 2) + Math.pow(maxY - minY, 2)) / 2 || 1;
+    var k = (W / 2 - 34) / demi;                 // tout le tracé tient dans le rond
+    var X = function (v) { return W / 2 + (v - cx) * k; };
+    var Y = function (v) { return W / 2 - (v - cy) * k; };   // le nord en haut
+
+    g.lineJoin = "round"; g.lineCap = "round";
+    if (msg.rn) {
+      g.strokeStyle = "#8a8f8b"; g.lineWidth = 2;
+      var ir = 0;
+      for (var p = 0; p < msg.rn.length; p++) {
+        g.beginPath();
+        for (var q = 0; q < msg.rn[p]; q++, ir++) {
+          if (q === 0) g.moveTo(X(msg.rx[ir]), Y(msg.ry[ir])); else g.lineTo(X(msg.rx[ir]), Y(msg.ry[ir]));
+        }
+        g.stroke();
+      }
+    }
+    g.strokeStyle = "#d22630"; g.lineWidth = 5;
+    g.beginPath();
+    for (var j = 0; j < n; j++) {
+      if (j === 0) g.moveTo(X(msg.x[j]), Y(msg.y[j])); else g.lineTo(X(msg.x[j]), Y(msg.y[j]));
+    }
+    g.stroke();
+
+    // arrivée : rond creux. départ : rond plein bleu (la couleur du curseur).
+    g.lineWidth = 4; g.strokeStyle = "#17211c"; g.fillStyle = "#ffffff";
+    g.beginPath(); g.arc(X(msg.x[n - 1]), Y(msg.y[n - 1]), 9, 0, 2 * Math.PI); g.fill(); g.stroke();
+    g.fillStyle = "#1f4fbf";
+    g.beginPath(); g.arc(X(msg.x[0]), Y(msg.y[0]), 11, 0, 2 * Math.PI); g.fill();
+  }
+
+  /* ---- Du GPX au fichier pour la montre ---- */
+  function nombre(v, decimales) {
+    return v.toLocaleString("fr-FR", { minimumFractionDigits: decimales, maximumFractionDigits: decimales });
+  }
+
+  function recalculer() {
+    if (!etat.brut) return;
+    var points = etat.brut.slice();
+    if ($("inverse").checked) points.reverse();
+    var max = parseInt($("maxpts").value, 10);
+    $("maxpts-val").textContent = max;
+    var leger = Core.alleger(points, max, 2);
+    var nom = $("nom").value.trim() || "Parcours";
+    var avecChemins = $("chemins").checked && Array.isArray(etat.chemins);
+    var msg = Core.fabriquer(leger.points, nom, etat.longueur, etat.aDenivele && $("denivele").checked,
+                             avecChemins ? etat.chemins : null);
+    etat.json = JSON.stringify(msg);
+
+    var octets = new Blob([etat.json]).size;
+    $("f-distance").textContent = nombre(etat.longueur / 1000, 1) + " km";
+    $("f-points").textContent = leger.points.length + " sur " + points.length;
+    $("f-ecart").textContent = leger.ecart < 1 ? "moins de 1 m" : nombre(leger.ecart, 0) + " m au plus";
+    $("f-poids").textContent = nombre(octets / 1000, 1) + " ko" + (octets > 30000 ? " (lourd : baisse le nombre de points)" : "");
+    if (!$("chemins").checked) {
+      $("f-chemins").textContent = "non";
+    } else if (avecChemins) {
+      var nbPts = msg.rx ? msg.rx.length : 0;
+      $("f-chemins").textContent = nbPts ? nbPts + " points" : "aucun trouvé";
+    } else {
+      $("f-chemins").textContent = etat.cheminsEtat || "–";
+    }
+    var enPanne = $("chemins").checked && etat.cheminsEtat === "indisponibles";
+    $("chemins-panne").hidden = !enPanne;
+    $("chemins-raison").textContent = enPanne ? etat.cheminsRaison : "";
+    dessiner(msg);
+    dire("etat-envoi", "", "");
+  }
+
+  function chargerTexte(xml, nomFichier) {
+    var gpx = Core.lireGpx(xml, DOMParser);
+    etat.brut = gpx.points;
+    etat.nomFichier = nomFichier || "";
+    etat.longueur = Core.longueur(gpx.points);
+    etat.aDenivele = gpx.points.every(function (p) { return p.ele !== null; });
+    var nom = gpx.nom || etat.nomFichier.replace(/\.[^.]+$/, "") || "Parcours";
+    $("nom").value = nom.slice(0, 24);
+    $("denivele").disabled = !etat.aDenivele;
+    if (!etat.aDenivele) {
+      $("denivele").checked = false;
+      $("denivele-aide").textContent = "Ce fichier ne contient pas d’altitude.";
+    } else {
+      $("denivele-aide").textContent = "Ajoute le profil d’altitude sur la montre.";
+    }
+    $("etape-2").hidden = false;
+    $("etape-3").hidden = false;
+    etat.chemins = null;
+    etat.cheminsEtat = "";
+    recalculer();
+    if ($("chemins").checked) lancerChemins();
+  }
+  window.chargerTexte = chargerTexte;      // utile pour les tests
+
+  $("fichier").addEventListener("change", function () {
+    var f = this.files && this.files[0];
+    if (!f) return;
+    $("fichier-texte").textContent = f.name;
+    var lecteur = new FileReader();
+    lecteur.onload = function () {
+      try {
+        chargerTexte(String(lecteur.result), f.name);
+        dire("etat-fichier", "", "");
+      } catch (e) {
+        $("etape-2").hidden = true; $("etape-3").hidden = true;
+        dire("etat-fichier", e.message, "erreur");
+      }
+    };
+    lecteur.onerror = function () { dire("etat-fichier", "Impossible de lire ce fichier.", "erreur"); };
+    lecteur.readAsText(f);
+  });
+  // Va chercher les chemins autour du tracé, une fois par fichier.
+  async function lancerChemins() {
+    if (!etat.brut || Array.isArray(etat.chemins) || etat.cheminsEtat === "chargement…") return;
+    var jeton = ++etat.jeton;
+    etat.cheminsEtat = "chargement…";
+    etat.cheminsRaison = "";
+    $("envoyer").disabled = true;
+    recalculer();
+    try {
+      var bruts = await Core.chargerChemins(etat.brut, window.fetch.bind(window));
+      if (jeton !== etat.jeton) return;
+      var reference = Core.alleger(etat.brut, 400, 2).points;
+      etat.chemins = Core.preparerChemins(bruts, reference, MAX_POINTS_CHEMINS);
+      etat.cheminsEtat = "";
+    } catch (e) {
+      if (jeton !== etat.jeton) return;
+      etat.cheminsEtat = "indisponibles";
+      etat.cheminsRaison = e && e.message ? e.message : "";
+      if (window.console) console.warn("Chemins OpenStreetMap :", e);
+    } finally {
+      if (jeton === etat.jeton) $("envoyer").disabled = false;
+    }
+    recalculer();
+  }
+
+  $("chemins-reessayer").addEventListener("click", function () {
+    etat.cheminsEtat = "";
+    lancerChemins();
+  });
+
+  $("chemins").addEventListener("change", function () {
+    if (this.checked && !Array.isArray(etat.chemins)) {
+      etat.cheminsEtat = "";
+      lancerChemins();
+    } else {
+      recalculer();
+    }
+  });
+
+  ["nom", "maxpts", "inverse", "denivele"].forEach(function (id) {
+    $(id).addEventListener("input", recalculer);
+    $(id).addEventListener("change", recalculer);
+  });
+
+  /* ---- Envoi sur GitHub ---- */
+  function base64(texte) {
+    var octets = new TextEncoder().encode(texte), bin = "";
+    for (var i = 0; i < octets.length; i++) bin += String.fromCharCode(octets[i]);
+    return btoa(bin);
+  }
+
+  function attendre(ms) { return new Promise(function (ok) { setTimeout(ok, ms); }); }
+
+  // Vérifie que le nouveau tracé est bien visible à l'adresse lue par la montre.
+  async function attendreEnLigne(adresse, attendu) {
+    for (var essai = 0; essai < 36; essai++) {          // 3 minutes au plus
+      await attendre(5000);
+      try {
+        var r = await fetch(adresse + "?t=" + Date.now(), { cache: "no-store" });
+        if (r.ok && (await r.text()).trim() === attendu) return true;
+      } catch (e) { /* on réessaie */ }
+    }
+    return false;
+  }
+
+  /* ---- Bibliothèque de tracés sur GitHub ----
+     index.json : { "t": [ { "id": "...", "n": "Nom" }, ... ] }, le plus récent en premier
+     t/<id>.json : un tracé (même format qu'avant) */
+  var MAX_TRACES = 5;
+
+  function connexion() {
+    var jeton = $("jeton").value.trim(), compte = $("compte").value.trim(), depot = $("depot").value.trim();
+    if (!jeton || !compte || !depot) return null;
+    return {
+      base: "https://api.github.com/repos/" + encodeURIComponent(compte) + "/" + encodeURIComponent(depot) + "/contents/",
+      entetes: { "Authorization": "Bearer " + jeton, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }
+    };
+  }
+
+  function erreurGitHub(statut) {
+    if (statut === 401) return new Error("GitHub refuse le jeton. Il est faux ou expiré.");
+    if (statut === 403 || statut === 404) return new Error("Ce jeton n’a pas le droit d’écrire dans ce dépôt.");
+    return new Error("GitHub répond " + statut + ". Réessaie dans un instant.");
+  }
+
+  function decoder64(texte) {
+    var bin = atob(texte.replace(/\s/g, "")), octets = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) octets[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(octets);
+  }
+
+  // Lit un fichier du dépôt. Rend { sha, texte } ou null s'il n'existe pas.
+  async function lireFichier(c, chemin) {
+    var r = await fetch(c.base + chemin + "?t=" + Date.now(), { headers: c.entetes, cache: "no-store" });
+    if (r.status === 404) return null;
+    if (r.status === 401) throw erreurGitHub(401);
+    if (!r.ok) throw new Error("GitHub répond " + r.status + ". Vérifie le compte et le dépôt.");
+    var j = await r.json();
+    return { sha: j.sha, texte: decoder64(j.content || "") };
+  }
+
+  async function ecrireFichier(c, chemin, texte, sha, message) {
+    var corps = { message: message, content: base64(texte) };
+    if (sha) corps.sha = sha;
+    var r = await fetch(c.base + chemin, { method: "PUT", headers: c.entetes, body: JSON.stringify(corps) });
+    if (!r.ok) throw erreurGitHub(r.status);
+  }
+
+  // Supprime un fichier du dépôt (sans bloquer si ça échoue).
+  async function supprimerFichier(c, chemin, message) {
+    try {
+      var f = await lireFichier(c, chemin);
+      if (!f) return;
+      await fetch(c.base + chemin, { method: "DELETE", headers: c.entetes,
+        body: JSON.stringify({ message: message, sha: f.sha }) });
+    } catch (e) { /* tant pis : le fichier reste, la montre ne le lira plus */ }
+  }
+
+  async function lireIndex(c) {
+    var f = await lireFichier(c, "index.json");
+    var liste = [];
+    if (f) {
+      try { liste = (JSON.parse(f.texte).t || []).filter(function (e) { return e && e.id && e.n; }); } catch (e) { liste = []; }
+    }
+    return { sha: f ? f.sha : null, liste: liste };
+  }
+
+  function afficherBiblio(liste) {
+    var ul = $("biblio");
+    ul.textContent = "";
+    if (!liste.length) {
+      var vide = document.createElement("li");
+      vide.textContent = "Aucun tracé pour l’instant.";
+      ul.appendChild(vide);
+      return;
+    }
+    liste.forEach(function (e, i) {
+      var li = document.createElement("li");
+      var nom = document.createElement("span");
+      nom.className = "nom-trace";
+      nom.textContent = e.n;
+      if (i === 0) {
+        var r = document.createElement("span");
+        r.className = "recent";
+        r.textContent = "le plus récent";
+        nom.appendChild(r);
+      }
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Retirer";
+      b.setAttribute("aria-label", "Retirer " + e.n);
+      b.addEventListener("click", function () { retirer(e.id, e.n); });
+      li.appendChild(nom);
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }
+
+  async function chargerBiblio() {
+    var c = connexion();
+    if (!c) { afficherBiblio([]); dire("etat-biblio", "Remplis les réglages pour voir la liste.", ""); return; }
+    try {
+      afficherBiblio((await lireIndex(c)).liste);
+      dire("etat-biblio", "", "");
+    } catch (e) {
+      dire("etat-biblio", e.message || "Impossible de lire la liste.", "erreur");
+    }
+  }
+
+  async function retirer(id, nom) {
+    var c = connexion();
+    if (!c) return;
+    dire("etat-biblio", "Retrait de « " + nom + " »…", "");
+    try {
+      var idx = await lireIndex(c);
+      var liste = idx.liste.filter(function (e) { return e.id !== id; });
+      await ecrireFichier(c, "index.json", JSON.stringify({ t: liste }), idx.sha, "Retrait : " + nom);
+      await supprimerFichier(c, "t/" + id + ".json", "Retrait : " + nom);
+      afficherBiblio(liste);
+      dire("etat-biblio", "Retiré. La montre l’enlèvera à sa prochaine mise à jour.", "ok");
+    } catch (e) {
+      dire("etat-biblio", e.message || "Le retrait a échoué.", "erreur");
+    }
+  }
+
+  // Vérifie que le nouveau tracé est bien dans la liste lue par la montre.
+  async function attendreDansIndex(adresse, id) {
+    for (var essai = 0; essai < 36; essai++) {          // 3 minutes au plus
+      await attendre(5000);
+      try {
+        var r = await fetch(adresse + "?t=" + Date.now(), { cache: "no-store" });
+        if (r.ok && ((await r.json()).t || []).some(function (e) { return e.id === id; })) return true;
+      } catch (e) { /* on réessaie */ }
+    }
+    return false;
+  }
+
+  async function envoyer() {
+    var c = connexion();
+    if (!c) {
+      $("reglages").open = true;
+      dire("etat-envoi", "Remplis d’abord les réglages en bas de page.", "erreur");
+      return;
+    }
+    if (!etat.json) return;
+    var json = etat.json;
+    var nom = $("nom").value.trim() || "Parcours";
+    var id = Date.now().toString(36);
+    $("envoyer").disabled = true;
+    dire("etat-envoi", "Envoi en cours…", "");
+    try {
+      // 1. le tracé
+      await ecrireFichier(c, "t/" + id + ".json", json, null, "Tracé : " + nom);
+      // 2. la liste : le nouveau en premier, un tracé du même nom est remplacé, 5 au plus
+      var idx = await lireIndex(c);
+      var garde = idx.liste.filter(function (e) { return e.n !== nom; });
+      var retires = idx.liste.filter(function (e) { return e.n === nom; });
+      var liste = [{ id: id, n: nom }].concat(garde);
+      retires = retires.concat(liste.slice(MAX_TRACES));
+      liste = liste.slice(0, MAX_TRACES);
+      await ecrireFichier(c, "index.json", JSON.stringify({ t: liste }), idx.sha, "Liste : ajout de " + nom);
+      afficherBiblio(liste);
+      // 3. ménage : fichiers des tracés sortis de la liste
+      for (var i = 0; i < retires.length; i++) {
+        await supprimerFichier(c, "t/" + retires[i].id + ".json", "Retrait : " + retires[i].n);
+      }
+
+      var adresse = adresseMontre() + "index.json";
+      var memeSite = location.protocol === "https:" && adresse.toLowerCase().indexOf(location.origin.toLowerCase() + "/") === 0;
+      if (!memeSite) {
+        dire("etat-envoi", "Tracé envoyé. Attends 1 minute, puis ouvre l’appli sur la montre.", "ok");
+        return;
+      }
+      dire("etat-envoi", "Tracé envoyé. Mise en ligne en cours (1 minute environ)…", "");
+      if (await attendreDansIndex(adresse, id)) {
+        dire("etat-envoi", "C’est en ligne. Ouvre l’appli sur la montre (ou Menu, Télécharger).", "ok");
+      } else {
+        dire("etat-envoi", "Tracé envoyé, mais pas encore visible en ligne. Attends 2 minutes avant d’ouvrir l’appli.", "");
+      }
+    } catch (e) {
+      var msg = e && e.message ? e.message : "";
+      if (/Failed to fetch|Load failed|NetworkError/i.test(msg)) msg = "Pas de connexion à GitHub. Vérifie ton réseau.";
+      dire("etat-envoi", msg || "L’envoi a échoué.", "erreur");
+    } finally {
+      $("envoyer").disabled = false;
+    }
+  }
+  $("envoyer").addEventListener("click", envoyer);
+
+  $("enregistrer").addEventListener("click", function () {
+    if (!etat.json) return;
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([etat.json], { type: "application/json" }));
+    a.download = ($("nom").value.trim() || "trace").replace(/[^\w\-]+/g, "_") + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+  });
+
+  initReglages();
+  chargerBiblio();
+  ["jeton", "compte", "depot"].forEach(function (id) { $(id).addEventListener("change", chargerBiblio); });
+})();
+
+if (typeof module !== "undefined") module.exports = Core;
+</script>
+</body>
+</html>
