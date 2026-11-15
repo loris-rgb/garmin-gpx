@@ -144,6 +144,16 @@
     font-weight: 400; color: var(--encre-douce); text-decoration: underline;
   }
 
+  .discret { font-weight: 400; color: var(--encre-douce); font-size: 0.9375rem; }
+  .aide-bloc { margin: 0 0 0.75rem; color: var(--encre-douce); font-size: 0.9375rem; }
+  ul.biblio { list-style: none; margin: 0; padding: 0; }
+  ul.biblio li {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.625rem 0; border-bottom: 1px solid var(--trait);
+  }
+  ul.biblio li .nom-trace { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  ul.biblio li .recent { color: var(--encre-douce); font-size: 0.875rem; display: block; }
+  ul.biblio li button { width: auto; padding: 0.375rem 0.75rem; font-size: 0.9375rem; font-weight: 600; border-width: 1.5px; }
   details {
     margin-top: 1.5rem;
     border-top: 1px solid var(--trait);
@@ -217,7 +227,17 @@
       <h2>Envoyer</h2>
       <button class="fort" id="envoyer" type="button">Envoyer vers la montre</button>
       <p class="etat" id="etat-envoi" role="status"></p>
-      <button class="lien-discret" id="enregistrer" type="button">Enregistrer le fichier track.json à la place</button>
+      <button class="lien-discret" id="enregistrer" type="button">Enregistrer le fichier du tracé à la place</button>
+    </div>
+  </section>
+
+  <section class="etape" id="etape-biblio">
+    <div class="num" aria-hidden="true">✓</div>
+    <div>
+      <h2>Dans la montre <span class="discret">(5 au plus)</span></h2>
+      <p class="aide-bloc">Le dernier envoyé devient le tracé actif. Sur la montre, menu « Tracés » pour en choisir un autre.</p>
+      <ul class="biblio" id="biblio"></ul>
+      <p class="etat" id="etat-biblio" role="status"></p>
     </div>
   </section>
 
@@ -241,7 +261,7 @@
         <span class="intitule">Adresse pour la montre</span>
         <code class="adresse" id="adresse">–</code>
         <button type="button" id="copier">Copier l’adresse</button>
-        <span class="aide">À coller dans le fichier TrackUrl.mc avant de compiler l’appli.</span>
+        <span class="aide">À coller dans le fichier TrackUrl.mc avant de compiler l’appli (ligne BASE_URL).</span>
       </div>
     </div>
   </details>
@@ -650,7 +670,7 @@ var Core = (function () {
     if (!compte || !depot) return "";
     var base = "https://" + compte.toLowerCase() + ".github.io/";
     if (depot.toLowerCase() !== compte.toLowerCase() + ".github.io") base += depot + "/";
-    return base + FICHIER;
+    return base;
   }
 
   function majAdresse() { $("adresse").textContent = adresseMontre() || "–"; }
@@ -867,46 +887,179 @@ var Core = (function () {
     return false;
   }
 
-  async function envoyer() {
+  /* ---- Bibliothèque de tracés sur GitHub ----
+     index.json : { "t": [ { "id": "...", "n": "Nom" }, ... ] }, le plus récent en premier
+     t/<id>.json : un tracé (même format qu'avant) */
+  var MAX_TRACES = 5;
+
+  function connexion() {
     var jeton = $("jeton").value.trim(), compte = $("compte").value.trim(), depot = $("depot").value.trim();
-    if (!jeton || !compte || !depot) {
+    if (!jeton || !compte || !depot) return null;
+    return {
+      base: "https://api.github.com/repos/" + encodeURIComponent(compte) + "/" + encodeURIComponent(depot) + "/contents/",
+      entetes: { "Authorization": "Bearer " + jeton, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }
+    };
+  }
+
+  function erreurGitHub(statut) {
+    if (statut === 401) return new Error("GitHub refuse le jeton. Il est faux ou expiré.");
+    if (statut === 403 || statut === 404) return new Error("Ce jeton n’a pas le droit d’écrire dans ce dépôt.");
+    return new Error("GitHub répond " + statut + ". Réessaie dans un instant.");
+  }
+
+  function decoder64(texte) {
+    var bin = atob(texte.replace(/\s/g, "")), octets = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) octets[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(octets);
+  }
+
+  // Lit un fichier du dépôt. Rend { sha, texte } ou null s'il n'existe pas.
+  async function lireFichier(c, chemin) {
+    var r = await fetch(c.base + chemin + "?t=" + Date.now(), { headers: c.entetes, cache: "no-store" });
+    if (r.status === 404) return null;
+    if (r.status === 401) throw erreurGitHub(401);
+    if (!r.ok) throw new Error("GitHub répond " + r.status + ". Vérifie le compte et le dépôt.");
+    var j = await r.json();
+    return { sha: j.sha, texte: decoder64(j.content || "") };
+  }
+
+  async function ecrireFichier(c, chemin, texte, sha, message) {
+    var corps = { message: message, content: base64(texte) };
+    if (sha) corps.sha = sha;
+    var r = await fetch(c.base + chemin, { method: "PUT", headers: c.entetes, body: JSON.stringify(corps) });
+    if (!r.ok) throw erreurGitHub(r.status);
+  }
+
+  // Supprime un fichier du dépôt (sans bloquer si ça échoue).
+  async function supprimerFichier(c, chemin, message) {
+    try {
+      var f = await lireFichier(c, chemin);
+      if (!f) return;
+      await fetch(c.base + chemin, { method: "DELETE", headers: c.entetes,
+        body: JSON.stringify({ message: message, sha: f.sha }) });
+    } catch (e) { /* tant pis : le fichier reste, la montre ne le lira plus */ }
+  }
+
+  async function lireIndex(c) {
+    var f = await lireFichier(c, "index.json");
+    var liste = [];
+    if (f) {
+      try { liste = (JSON.parse(f.texte).t || []).filter(function (e) { return e && e.id && e.n; }); } catch (e) { liste = []; }
+    }
+    return { sha: f ? f.sha : null, liste: liste };
+  }
+
+  function afficherBiblio(liste) {
+    var ul = $("biblio");
+    ul.textContent = "";
+    if (!liste.length) {
+      var vide = document.createElement("li");
+      vide.textContent = "Aucun tracé pour l’instant.";
+      ul.appendChild(vide);
+      return;
+    }
+    liste.forEach(function (e, i) {
+      var li = document.createElement("li");
+      var nom = document.createElement("span");
+      nom.className = "nom-trace";
+      nom.textContent = e.n;
+      if (i === 0) {
+        var r = document.createElement("span");
+        r.className = "recent";
+        r.textContent = "le plus récent";
+        nom.appendChild(r);
+      }
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Retirer";
+      b.setAttribute("aria-label", "Retirer " + e.n);
+      b.addEventListener("click", function () { retirer(e.id, e.n); });
+      li.appendChild(nom);
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }
+
+  async function chargerBiblio() {
+    var c = connexion();
+    if (!c) { afficherBiblio([]); dire("etat-biblio", "Remplis les réglages pour voir la liste.", ""); return; }
+    try {
+      afficherBiblio((await lireIndex(c)).liste);
+      dire("etat-biblio", "", "");
+    } catch (e) {
+      dire("etat-biblio", e.message || "Impossible de lire la liste.", "erreur");
+    }
+  }
+
+  async function retirer(id, nom) {
+    var c = connexion();
+    if (!c) return;
+    dire("etat-biblio", "Retrait de « " + nom + " »…", "");
+    try {
+      var idx = await lireIndex(c);
+      var liste = idx.liste.filter(function (e) { return e.id !== id; });
+      await ecrireFichier(c, "index.json", JSON.stringify({ t: liste }), idx.sha, "Retrait : " + nom);
+      await supprimerFichier(c, "t/" + id + ".json", "Retrait : " + nom);
+      afficherBiblio(liste);
+      dire("etat-biblio", "Retiré. La montre l’enlèvera à sa prochaine mise à jour.", "ok");
+    } catch (e) {
+      dire("etat-biblio", e.message || "Le retrait a échoué.", "erreur");
+    }
+  }
+
+  // Vérifie que le nouveau tracé est bien dans la liste lue par la montre.
+  async function attendreDansIndex(adresse, id) {
+    for (var essai = 0; essai < 36; essai++) {          // 3 minutes au plus
+      await attendre(5000);
+      try {
+        var r = await fetch(adresse + "?t=" + Date.now(), { cache: "no-store" });
+        if (r.ok && ((await r.json()).t || []).some(function (e) { return e.id === id; })) return true;
+      } catch (e) { /* on réessaie */ }
+    }
+    return false;
+  }
+
+  async function envoyer() {
+    var c = connexion();
+    if (!c) {
       $("reglages").open = true;
       dire("etat-envoi", "Remplis d’abord les réglages en bas de page.", "erreur");
       return;
     }
     if (!etat.json) return;
     var json = etat.json;
-    var api = "https://api.github.com/repos/" + encodeURIComponent(compte) + "/" + encodeURIComponent(depot) + "/contents/" + FICHIER;
-    var entetes = {
-      "Authorization": "Bearer " + jeton,
-      "Accept": "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28"
-    };
+    var nom = $("nom").value.trim() || "Parcours";
+    var id = Date.now().toString(36);
     $("envoyer").disabled = true;
     dire("etat-envoi", "Envoi en cours…", "");
     try {
-      var corps = { message: "Tracé : " + ($("nom").value.trim() || "Parcours"), content: base64(json) };
-      var existant = await fetch(api + "?t=" + Date.now(), { headers: entetes, cache: "no-store" });
-      if (existant.status === 200) corps.sha = (await existant.json()).sha;
-      else if (existant.status === 401) throw new Error("GitHub refuse le jeton. Il est faux ou expiré.");
-      else if (existant.status !== 404) throw new Error("GitHub répond " + existant.status + ". Vérifie le compte et le dépôt.");
+      // 1. le tracé
+      await ecrireFichier(c, "t/" + id + ".json", json, null, "Tracé : " + nom);
+      // 2. la liste : le nouveau en premier, un tracé du même nom est remplacé, 5 au plus
+      var idx = await lireIndex(c);
+      var garde = idx.liste.filter(function (e) { return e.n !== nom; });
+      var retires = idx.liste.filter(function (e) { return e.n === nom; });
+      var liste = [{ id: id, n: nom }].concat(garde);
+      retires = retires.concat(liste.slice(MAX_TRACES));
+      liste = liste.slice(0, MAX_TRACES);
+      await ecrireFichier(c, "index.json", JSON.stringify({ t: liste }), idx.sha, "Liste : ajout de " + nom);
+      afficherBiblio(liste);
+      // 3. ménage : fichiers des tracés sortis de la liste
+      for (var i = 0; i < retires.length; i++) {
+        await supprimerFichier(c, "t/" + retires[i].id + ".json", "Retrait : " + retires[i].n);
+      }
 
-      var ecrit = await fetch(api, { method: "PUT", headers: entetes, body: JSON.stringify(corps) });
-      if (ecrit.status === 401) throw new Error("GitHub refuse le jeton. Il est faux ou expiré.");
-      if (ecrit.status === 403 || ecrit.status === 404) throw new Error("Ce jeton n’a pas le droit d’écrire dans ce dépôt.");
-      if (!ecrit.ok) throw new Error("GitHub répond " + ecrit.status + ". Réessaie dans un instant.");
-
-      var adresse = adresseMontre();
+      var adresse = adresseMontre() + "index.json";
       var memeSite = location.protocol === "https:" && adresse.toLowerCase().indexOf(location.origin.toLowerCase() + "/") === 0;
       if (!memeSite) {
-        dire("etat-envoi", "Tracé envoyé. Attends 1 minute, puis sur la montre : Menu, Télécharger.", "ok");
+        dire("etat-envoi", "Tracé envoyé. Attends 1 minute, puis ouvre l’appli sur la montre.", "ok");
         return;
       }
       dire("etat-envoi", "Tracé envoyé. Mise en ligne en cours (1 minute environ)…", "");
-      if (await attendreEnLigne(adresse, json)) {
-        dire("etat-envoi", "C’est en ligne. Sur la montre : Menu, puis Télécharger.", "ok");
+      if (await attendreDansIndex(adresse, id)) {
+        dire("etat-envoi", "C’est en ligne. Ouvre l’appli sur la montre (ou Menu, Télécharger).", "ok");
       } else {
-        dire("etat-envoi", "Tracé envoyé, mais pas encore visible en ligne. Attends 2 minutes avant de télécharger sur la montre.", "");
+        dire("etat-envoi", "Tracé envoyé, mais pas encore visible en ligne. Attends 2 minutes avant d’ouvrir l’appli.", "");
       }
     } catch (e) {
       var msg = e && e.message ? e.message : "";
@@ -922,11 +1075,13 @@ var Core = (function () {
     if (!etat.json) return;
     var a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([etat.json], { type: "application/json" }));
-    a.download = FICHIER;
+    a.download = ($("nom").value.trim() || "trace").replace(/[^\w\-]+/g, "_") + ".json";
     document.body.appendChild(a); a.click(); a.remove();
   });
 
   initReglages();
+  chargerBiblio();
+  ["jeton", "compte", "depot"].forEach(function (id) { $(id).addEventListener("change", chargerBiblio); });
 })();
 
 if (typeof module !== "undefined") module.exports = Core;
