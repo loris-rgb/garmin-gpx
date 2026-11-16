@@ -269,7 +269,7 @@
   <footer>
     Le tracé mis en ligne est public : toute personne qui a l’adresse peut le voir.
     Format de tracé repris de <a href="https://github.com/andan67/wormnav">WormNav</a> (GPL-3.0).
-    Chemins : © les contributeurs d’<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>.
+    Chemins : © les contributeurs d’<a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, tuiles <a href="https://openfreemap.org">OpenFreeMap</a>.
   </footer>
 </main>
 
@@ -443,56 +443,247 @@ var Core = (function () {
     }
   }
 
-  // Demande à OpenStreetMap les routes et sentiers proches du tracé.
-  // Essaie plusieurs serveurs, et deux façons de demander.
-  // Rend une liste de chemins : [[{lat, lon}, ...], ...]
-  async function chargerChemins(points, fetchFn) {
+  /* --- Source 1 : tuiles OpenFreeMap (données OpenStreetMap déjà découpées en carrés).
+         Fichiers fixes servis par un réseau de diffusion : rapides et presque jamais saturés. --- */
+
+  var TUILES_INFO = "https://tiles.openfreemap.org/planet";
+  var TUILES_EXCLUES = { rail: 1, transit: 1, ferry: 1, aerialway: 1, raceway: 1, bus_guideway: 1, busway: 1 };
+
+  // Lecteur minimal du format des tuiles (protobuf « Mapbox Vector Tile »).
+  function Lecteur(octets) { this.o = octets; this.p = 0; }
+  Lecteur.prototype.varint = function () {
+    var r = 0, mul = 1, b;
+    do { b = this.o[this.p++]; r += (b & 0x7f) * mul; mul *= 128; } while (b >= 0x80);
+    return r;
+  };
+  Lecteur.prototype.bloc = function () { var n = this.varint(), d = this.p; this.p += n; return this.o.subarray(d, d + n); };
+  Lecteur.prototype.sauter = function (type) {
+    if (type === 0) this.varint(); else if (type === 1) this.p += 8;
+    else if (type === 2) this.p += this.varint(); else if (type === 5) this.p += 4;
+    else throw new Error("tuile illisible");
+  };
+  Lecteur.prototype.fin = function () { return this.p >= this.o.length; };
+  function texteUtf8(o) { return new TextDecoder().decode(o); }
+  function paquet(o) { var l = new Lecteur(o), r = []; while (!l.fin()) r.push(l.varint()); return r; }
+
+  // Rend les lignes de la couche « transportation » d'une tuile, en { lat, lon }.
+  function decoderTuile(octets, z, tx, ty) {
+    var tuile = new Lecteur(octets), lignes = [];
+    while (!tuile.fin()) {
+      var cle = tuile.varint();
+      if ((cle >> 3) !== 3) { tuile.sauter(cle & 7); continue; }
+      var couche = new Lecteur(tuile.bloc());
+      var nom = "", objets = [], cles = [], valeurs = [], etendue = 4096;
+      while (!couche.fin()) {
+        var k = couche.varint(), champ = k >> 3;
+        if (champ === 1) nom = texteUtf8(couche.bloc());
+        else if (champ === 2) objets.push(couche.bloc());
+        else if (champ === 3) cles.push(texteUtf8(couche.bloc()));
+        else if (champ === 4) {
+          var v = new Lecteur(couche.bloc()), val = null;
+          while (!v.fin()) { var kv = v.varint(); if ((kv >> 3) === 1) val = texteUtf8(v.bloc()); else v.sauter(kv & 7); }
+          valeurs.push(val);
+        } else if (champ === 5) etendue = couche.varint();
+        else couche.sauter(k & 7);
+      }
+      if (nom !== "transportation") continue;
+      var n = Math.pow(2, z);
+      objets.forEach(function (o) {
+        var f = new Lecteur(o), etiquettes = [], type = 0, geo = null;
+        while (!f.fin()) {
+          var kf = f.varint(), cf = kf >> 3;
+          if (cf === 2) etiquettes = paquet(f.bloc());
+          else if (cf === 3) type = f.varint();
+          else if (cf === 4) geo = paquet(f.bloc());
+          else f.sauter(kf & 7);
+        }
+        if (type !== 2 || !geo) return;
+        for (var t = 0; t + 1 < etiquettes.length; t += 2) {
+          if (cles[etiquettes[t]] === "class" && TUILES_EXCLUES[valeurs[etiquettes[t + 1]]]) return;
+        }
+        var x = 0, y = 0, i = 0, courante = null;
+        function point() {
+          var mx = (tx + x / etendue) / n, my = (ty + y / etendue) / n;
+          return { lat: Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) * 180 / Math.PI, lon: mx * 360 - 180 };
+        }
+        while (i < geo.length) {
+          var cmd = geo[i] & 7, nb = geo[i] >> 3; i++;
+          if (cmd === 7) continue;
+          for (var c = 0; c < nb; c++) {
+            x += (geo[i] >>> 1) ^ -(geo[i] & 1);
+            y += (geo[i + 1] >>> 1) ^ -(geo[i + 1] & 1);
+            i += 2;
+            if (cmd === 1) { if (courante && courante.length > 1) lignes.push(courante); courante = [point()]; }
+            else if (cmd === 2 && courante) courante.push(point());
+          }
+        }
+        if (courante && courante.length > 1) lignes.push(courante);
+      });
+    }
+    return lignes;
+  }
+
+  function tuileDe(lat, lon, z) {
+    var n = Math.pow(2, z), r = lat * RAD;
+    return [Math.floor((lon + 180) / 360 * n),
+            Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n)];
+  }
+
+  // Tuiles qui touchent la bande de 150 m autour du tracé.
+  function tuilesAutour(points, z) {
+    var vues = {}, liste = [];
+    var guide = alleger(points, 400, 20).points;
+    var dLat = RAYON_CHEMINS / 111000;
+    function ajouter(lat, lon) {
+      var t = tuileDe(lat, lon, z), k = t[0] + "/" + t[1];
+      if (!vues[k]) { vues[k] = 1; liste.push(t); }
+    }
+    for (var i = 0; i < guide.length; i++) {
+      var a = guide[i], c = guide[Math.min(i + 1, guide.length - 1)];
+      var pas = Math.max(1, Math.ceil(haversine(a, c) / 200));
+      for (var j = 0; j <= pas; j++) {
+        var lat = a.lat + (c.lat - a.lat) * j / pas, lon = a.lon + (c.lon - a.lon) * j / pas;
+        var dLon = dLat / Math.cos(lat * RAD);
+        ajouter(lat + dLat, lon - dLon); ajouter(lat + dLat, lon + dLon);
+        ajouter(lat - dLat, lon - dLon); ajouter(lat - dLat, lon + dLon);
+      }
+    }
+    return liste;
+  }
+
+  async function lireOctets(r) {
+    var o = new Uint8Array(await r.arrayBuffer());
+    if (o.length > 2 && o[0] === 0x1f && o[1] === 0x8b && typeof DecompressionStream !== "undefined") {
+      var flux = new Blob([o]).stream().pipeThrough(new DecompressionStream("gzip"));
+      o = new Uint8Array(await new Response(flux).arrayBuffer());
+    }
+    return o;
+  }
+
+  async function avecDelai(promesse, ms, arret) {
+    var minuteur = setTimeout(function () { if (arret) arret.abort(); }, ms);
+    try { return await promesse; } finally { clearTimeout(minuteur); }
+  }
+
+  async function chargerParTuiles(points, fetchFn) {
+    var arret = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var signal = arret ? arret.signal : undefined;
+    return avecDelai((async function () {
+      var info = await fetchFn(TUILES_INFO, { signal: signal });
+      if (!info.ok) { var e1 = new Error("statut " + info.status); e1.statut = info.status; throw e1; }
+      var tj = await info.json();
+      var modele = tj.tiles && tj.tiles[0];
+      if (!modele) throw new Error("adresse des tuiles absente");
+      var z = Math.min(14, tj.maxzoom || 14);
+      var tuiles = tuilesAutour(points, z);
+      if (tuiles.length > 80) throw new Error("tracé trop grand pour les tuiles");
+      var lignes = [], suivante = 0;
+      async function ouvrier() {
+        while (suivante < tuiles.length) {
+          var t = tuiles[suivante++];
+          var url = modele.replace("{z}", z).replace("{x}", t[0]).replace("{y}", t[1]);
+          var r = await fetchFn(url, { signal: signal });
+          if (r.status === 204 || r.status === 404) continue;      // carré vide (mer, champ…)
+          if (!r.ok) { var e2 = new Error("statut " + r.status); e2.statut = r.status; throw e2; }
+          var octets = await lireOctets(r);
+          var trouvees = decoderTuile(octets, z, t[0], t[1]);
+          for (var q = 0; q < trouvees.length; q++) lignes.push(trouvees[q]);
+        }
+      }
+      var ouvriers = [];
+      for (var k = 0; k < 6; k++) ouvriers.push(ouvrier());
+      await Promise.all(ouvriers);
+      return lignes;
+    })(), 25000, arret);
+  }
+
+  /* --- Source 2 (secours) : serveurs Overpass, interrogés tous en même temps. --- */
+
+  async function chargerParOverpass(points, fetchFn) {
     var guide = alleger(points, 80, 25).points;
     var coords = guide.map(function (p) { return p.lat.toFixed(5) + "," + p.lon.toFixed(5); }).join(",");
     var b = boite(points);
     var marge = RAYON_CHEMINS / 111000, margeLon = marge / Math.cos((b.minLat + b.maxLat) / 2 * RAD);
     var cadre = (b.minLat - marge).toFixed(5) + "," + (b.minLon - margeLon).toFixed(5) + "," +
                 (b.maxLat + marge).toFixed(5) + "," + (b.maxLon + margeLon).toFixed(5);
-    var parCadre = "[out:json][timeout:25];way(" + cadre + ")[highway]" + EXCLUS + ";out geom qt;";
-    var parTrace = "[out:json][timeout:25];way(around:" + RAYON_CHEMINS + "," + coords + ")[highway]" + EXCLUS + ";out geom qt;";
-    // Un rectangle autour du tracé est beaucoup plus léger à calculer pour le serveur.
-    // Pour un grand tracé, le rectangle ramènerait trop de chemins : on suit alors le tracé.
+    var parCadre = "[out:json][timeout:50];way(" + cadre + ")[highway]" + EXCLUS + ";out geom qt;";
+    var parTrace = "[out:json][timeout:50];way(around:" + RAYON_CHEMINS + "," + coords + ")[highway]" + EXCLUS + ";out geom qt;";
     var diagonale = haversine({ lat: b.minLat, lon: b.minLon }, { lat: b.maxLat, lon: b.maxLon });
-    var requetes = diagonale < 12000 ? [parCadre, parTrace] : [parTrace, parCadre];
+    var requete = diagonale < 12000 ? parCadre : parTrace;
+    var autre = requete === parCadre ? parTrace : parCadre;
     var raisons = [];
-    for (var i = 0; i < OVERPASS.length; i++) {
-      for (var q = 0; q < requetes.length; q++) {
-        var essai = 0, reformuler = false;
-        while (essai < 2) {
-          try {
-            var json = await interroger(OVERPASS[i], requetes[q], fetchFn);
-            var chemins = [];
-            (json.elements || []).forEach(function (el) {
-              if (el.type === "way" && Array.isArray(el.geometry) && el.geometry.length > 1) {
-                chemins.push(el.geometry.filter(Boolean).map(function (g) { return { lat: g.lat, lon: g.lon }; }));
-              }
-            });
-            return chemins;
-          } catch (e) {
-            essai++;
-            var surcharge = e && [429, 502, 503, 504].indexOf(e.statut) >= 0;
-            if (surcharge && essai < 2) {
-              // serveur débordé : on attend un peu et on réessaie une fois
-              await new Promise(function (ok) { setTimeout(ok, 4000); });
-              continue;
-            }
-            raisons.push(raison(e, OVERPASS[i]));
-            // seule une demande refusée (400) vaut la peine d'être reformulée sur le même serveur
-            reformuler = e && e.statut === 400;
-            break;
-          }
+    var arrets = [];
+
+    function lignesDe(json) {
+      var chemins = [];
+      (json.elements || []).forEach(function (el) {
+        if (el.type === "way" && Array.isArray(el.geometry) && el.geometry.length > 1) {
+          chemins.push(el.geometry.filter(Boolean).map(function (g) { return { lat: g.lat, lon: g.lon }; }));
         }
-        if (!reformuler) break;
+      });
+      return chemins;
+    }
+
+    async function unServeur(serveur) {
+      var essais = [requete];
+      for (var q = 0; q < essais.length; q++) {
+        var arret = typeof AbortController !== "undefined" ? new AbortController() : null;
+        arrets.push(arret);
+        try {
+          var r = await avecDelai(fetchFn(serveur, {
+            method: "POST",
+            signal: arret ? arret.signal : undefined,
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: "data=" + encodeURIComponent(essais[q])
+          }), 60000, arret);
+          if (!r.ok) { var err = new Error("statut " + r.status); err.statut = r.status; throw err; }
+          return lignesDe(await r.json());
+        } catch (e) {
+          if (e && e.statut === 400 && essais.length === 1) { essais.push(autre); continue; }
+          raisons.push(raison(e, serveur));
+          throw e;
+        }
       }
     }
-    var fin = new Error(raisons.join(" ; "));
-    fin.raisons = raisons;
-    throw fin;
+
+    // Le premier serveur qui répond gagne ; on arrête alors les autres.
+    return new Promise(function (ok, ko) {
+      var restants = OVERPASS.length;
+      OVERPASS.forEach(function (serveur) {
+        unServeur(serveur).then(function (chemins) {
+          arrets.forEach(function (a) { try { if (a) a.abort(); } catch (e) {} });
+          ok(chemins);
+        }, function () {
+          if (--restants === 0) {
+            var fin = new Error(raisons.join(" ; "));
+            fin.raisons = raisons;
+            ko(fin);
+          }
+        });
+      });
+    });
+  }
+
+  // Demande les routes et sentiers proches du tracé.
+  // D'abord les tuiles (rapides), puis les serveurs Overpass en secours.
+  // Rend une liste de chemins : [[{lat, lon}, ...], ...]
+  async function chargerChemins(points, fetchFn) {
+    var raisonTuiles = "";
+    try {
+      var lignes = await chargerParTuiles(points, fetchFn);
+      if (lignes.length) return lignes;
+      raisonTuiles = "tuiles : aucun chemin";
+    } catch (e) {
+      raisonTuiles = raison(e, TUILES_INFO);
+      if (typeof console !== "undefined") console.warn("Tuiles OpenFreeMap :", e);
+    }
+    try {
+      return await chargerParOverpass(points, fetchFn);
+    } catch (e) {
+      var fin = new Error(raisonTuiles + " ; " + e.message);
+      fin.raisons = [raisonTuiles].concat(e.raisons || []);
+      throw fin;
+    }
   }
 
   // Garde les morceaux de chemins proches du tracé, allégés, sans dépasser maxPts points.
@@ -641,7 +832,8 @@ var Core = (function () {
   }
 
   return { lireGpx: lireGpx, longueur: longueur, alleger: alleger, fabriquer: fabriquer,
-           chargerChemins: chargerChemins, preparerChemins: preparerChemins,
+           chargerChemins: chargerChemins, preparerChemins: preparerChemins, decoderTuile: decoderTuile,
+           tuilesAutour: tuilesAutour,
            projeter: projeter, R: R, ECHELLE: ECHELLE };
 })();
 
@@ -843,7 +1035,6 @@ var Core = (function () {
     var jeton = ++etat.jeton;
     etat.cheminsEtat = "chargement…";
     etat.cheminsRaison = "";
-    $("envoyer").disabled = true;
     recalculer();
     try {
       var bruts = await Core.chargerChemins(etat.brut, window.fetch.bind(window));
@@ -856,8 +1047,6 @@ var Core = (function () {
       etat.cheminsEtat = "indisponibles";
       etat.cheminsRaison = e && e.message ? e.message : "";
       if (window.console) console.warn("Chemins OpenStreetMap :", e);
-    } finally {
-      if (jeton === etat.jeton) $("envoyer").disabled = false;
     }
     recalculer();
   }
@@ -1044,6 +1233,7 @@ var Core = (function () {
     if (!etat.json) return;
     var json = etat.json;
     var nom = $("nom").value.trim() || "Parcours";
+    var sansChemins = $("chemins").checked && !Array.isArray(etat.chemins);
     var id = Date.now().toString(36);
     $("envoyer").disabled = true;
     dire("etat-envoi", "Envoi en cours…", "");
@@ -1067,12 +1257,12 @@ var Core = (function () {
       var adresse = adresseMontre() + "index.json";
       var memeSite = location.protocol === "https:" && adresse.toLowerCase().indexOf(location.origin.toLowerCase() + "/") === 0;
       if (!memeSite) {
-        dire("etat-envoi", "Tracé envoyé. Attends 1 minute, puis ouvre l’appli sur la montre.", "ok");
+        dire("etat-envoi", "Tracé envoyé. Attends 1 minute, puis ouvre l’appli sur la montre." + (sansChemins ? " Envoyé sans les chemins autour." : ""), "ok");
         return;
       }
       dire("etat-envoi", "Tracé envoyé. Mise en ligne en cours (1 minute environ)…", "");
       if (await attendreDansIndex(adresse, id)) {
-        dire("etat-envoi", "C’est en ligne. Ouvre l’appli sur la montre (ou Menu, Télécharger).", "ok");
+        dire("etat-envoi", "C’est en ligne. Ouvre l’appli sur la montre (ou Menu, Télécharger)." + (sansChemins ? " Envoyé sans les chemins autour." : ""), "ok");
       } else {
         dire("etat-envoi", "Tracé envoyé, mais pas encore visible en ligne. Attends 2 minutes avant d’ouvrir l’appli.", "");
       }
