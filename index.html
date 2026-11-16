@@ -307,14 +307,49 @@ var Core = (function () {
       if (!noeuds.length) noeuds = doc.getElementsByTagName(sortes[s]);
     }
     var points = [];
-    for (var i = 0; i < noeuds.length; i++) {
-      var lat = parseFloat(noeuds[i].getAttribute("lat"));
-      var lon = parseFloat(noeuds[i].getAttribute("lon"));
-      if (!isFinite(lat) || !isFinite(lon)) continue;
-      var e = parseFloat(texte(noeuds[i], "ele"));
+    function ajouter(lat, lon, e) {
+      if (!isFinite(lat) || !isFinite(lon)) return;
+      var der = points[points.length - 1];
+      if (der && der.lat === lat && der.lon === lon) {     // point en double
+        if (der.ele === null && isFinite(e)) der.ele = e;
+        return;
+      }
       points.push({ lat: lat, lon: lon, ele: isFinite(e) ? e : null });
     }
+    for (var i = 0; i < noeuds.length; i++) {
+      ajouter(parseFloat(noeuds[i].getAttribute("lat")), parseFloat(noeuds[i].getAttribute("lon")),
+              parseFloat(texte(noeuds[i], "ele")));
+      // Itinéraires (gpx.studio, Garmin…) : le chemin détaillé entre deux points
+      // est rangé dans des points « rpt » cachés dans les extensions.
+      var details = noeuds[i].getElementsByTagNameNS("*", "rpt");
+      for (var d = 0; d < details.length; d++) {
+        ajouter(parseFloat(details[d].getAttribute("lat")), parseFloat(details[d].getAttribute("lon")), NaN);
+      }
+    }
     if (points.length < 2) throw new Error("Aucun tracé trouvé dans ce fichier.");
+
+    // Altitude manquante sur certains points : on la déduit de ses voisins, selon la distance.
+    var connus = [];
+    for (var c = 0; c < points.length; c++) if (points[c].ele !== null) connus.push(c);
+    if (connus.length && connus.length < points.length) {
+      var cumul = [0];
+      for (var k = 1; k < points.length; k++) cumul.push(cumul[k - 1] + haversine(points[k - 1], points[k]));
+      for (var k2 = 0; k2 < points.length; k2++) {
+        if (points[k2].ele !== null) continue;
+        var av = -1, ap = -1;
+        for (var a = 0; a < connus.length; a++) {
+          if (connus[a] < k2) av = connus[a];
+          else { ap = connus[a]; break; }
+        }
+        if (av < 0) points[k2].ele = points[ap].ele;
+        else if (ap < 0) points[k2].ele = points[av].ele;
+        else {
+          var portee = cumul[ap] - cumul[av];
+          var t = portee > 0 ? (cumul[k2] - cumul[av]) / portee : 0;
+          points[k2].ele = points[av].ele + t * (points[ap].ele - points[av].ele);
+        }
+      }
+    }
 
     var nom = "";
     var parents = ["trk", "rte", "metadata"];
